@@ -1,9 +1,6 @@
 # OutOfTune
 
-Entra ID / Intune attack chain for authorised red team engagements. Registers a rogue device in Entra ID, enrolls it into Intune MDM, and checks the resulting compliance state — without needing a real Windows machine or existing device credentials.
-
-> For authorised use only.
-
+Inspired by the original Pytune, OutOfTune registers a rogue device in Entra ID, enrolls it into Intune MDM, and checks the resulting compliance state - without needing a real Windows machine or existing device credentials.
 ---
 
 ## Requirements
