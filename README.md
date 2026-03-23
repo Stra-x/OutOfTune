@@ -1,6 +1,7 @@
 # OutOfTune
 
 Inspired by the original Pytune, OutOfTune registers a rogue device in Entra ID, enrolls it into Intune MDM, and checks the resulting compliance state.
+
 ---
 
 ## Requirements
