@@ -1140,8 +1140,8 @@ _EPILOG = """\
 -----------------------------------------------------------------------------
   WINDOWS CHAIN  (Entra device join -> MDM enroll -> checkin)
 -----------------------------------------------------------------------------
-  drs-token   -u user@eko-tech.co.uk -p Password1!         # ROPC (creds known)
-  drs-token   -u user@eko-tech.co.uk -t <drs_token>        # token
+  drs-token   -u user@balh.com -p Password1!         # ROPC (creds known)
+  drs-token   -u user@balh.com -t <drs_token>        # token
   device-join [-n DEVICENAME]
   device-token [--cert device.pfx]
   mdm-enroll  [--cert device.pfx] [--profile FILE]
@@ -1150,13 +1150,13 @@ _EPILOG = """\
 -----------------------------------------------------------------------------
   COMPLIANCE CHECK
 -----------------------------------------------------------------------------
-  check   -u user@eko-tech.co.uk -r <refresh_token>     # MFA refresh token
-  check   -u user@eko-tech.co.uk -p Password1!          # ROPC (may fail CA)
+  check   -u user@balh.com -r <refresh_token>     # MFA refresh token
+  check   -u user@balh.com -p Password1!          # ROPC (may fail CA)
 
 -----------------------------------------------------------------------------
   CLEANUP
 -----------------------------------------------------------------------------
-  retire-intune  -u user@eko-tech.co.uk -r <refresh_token>
+  retire-intune  -u user@balh.com -r <refresh_token>
   entra-delete
 
 -----------------------------------------------------------------------------
