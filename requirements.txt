@@ -1,0 +1,7 @@
+requests
+pyjwt
+cryptography
+roadlib
+xmltodict
+rich
+colr

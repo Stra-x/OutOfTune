@@ -1,0 +1,39 @@
+{
+  "_note": "Dell Latitude 5540 running Windows 11 Enterprise 23H2. Passes common compliance policies: min OS version, BitLocker, Enterprise edition, approved manufacturer, Defender, firewall.",
+  "_usage": "python OutOfTune.py mdm-enroll --profile profiles/dell_win11_ent.json",
+
+  "os_version":        "10.0.22631.3296",
+  "os_platform":       "Windows 11 Enterprise",
+  "os_edition_enroll": "72",
+  "os_edition_syncml": "4",
+
+  "manufacturer":      "Dell Inc.",
+  "model":             "Latitude 5540",
+  "firmware_ver":      "1.22.0",
+  "hw_version":        "Intel(R) Core(TM) i7-1365U",
+  "device_type_str":   "PC",
+  "oem":               "Dell Inc.",
+
+  "locale":            "en-GB",
+  "proc_arch":         "9",
+
+  "mac_address":       "A4-C3-F0-45-12-9B",
+  "hw_dev_id_enroll":  "4C4C4544004D00105A568CBD68C04D32444C4C4544004D00105A568CBD68C04D",
+  "hw_dev_id_syncml":  "4C4C4544004D00105A568CBD68C04D32444C4C4544004D00105A568CBD68C04D",
+
+  "bitlocker_status":         2,
+  "cname":                    "ConfigMgrEnroll",
+
+  "encryption_compliance":    "1",
+  "firewall_status":          "0",
+  "av_status":                "0",
+  "av_signature_status":      "0",
+  "antispyware_status":       "0",
+  "antispyware_sig_status":   "0",
+  "tpm_version":              "2.0",
+  "secure_boot_state":        "1",
+  "defender_enabled":         "true",
+  "defender_version":         "4.18.24110.4",
+  "defender_sig_out_of_date": "false",
+  "defender_rtp_enabled":     "true"
+}

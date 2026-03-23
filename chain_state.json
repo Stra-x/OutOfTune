@@ -1,0 +1,18 @@
+{
+  "username": "",
+  "uid": "",
+  "tenant": "",
+  "drs_token": "",
+  "device_name": "",
+  "pfx_path": "",
+  "device_id": "",
+  "device_token": "",
+  "device_os": "",
+  "mdm_pfx_path": "",
+  "enrollment_url": "",
+  "profile_path": "",
+  "user_rt": "",
+  "rt_client_id": "",
+  "iw_service_url": null,
+  "iw_renewal_url": null
+}

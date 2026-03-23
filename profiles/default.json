@@ -1,0 +1,79 @@
+{
+  "_note": "Default profile -- mirrors the hardcoded values in windows.py. Use as a reference or starting point.",
+  "_compliance_notes": {
+    
+	"_section_identity": "--- DEVICE IDENTITY (sent in SOAP enrollment + SyncML) ---",
+    "os_version":               "Reported as SwV in SyncML and OSVersion in SOAP. Intune min/max OS version compliance checks use this. Match or exceed the policy threshold.",
+    "os_platform":              "String shown in Intune portal (e.g. 'Windows 10 Enterprise', 'Windows 11 Enterprise'). Informational only.",
+    "os_edition_enroll":        "OSEdition sent in SOAP enrollment context. 72 = Enterprise. Does not affect compliance directly -- use os_edition_syncml for that.",
+    "os_edition_syncml":        "Reported via DeviceStatus/OS/Edition and WindowsLicensing/Edition CSPs. 4 = Enterprise, 48 = Professional. Compliance policies requiring Enterprise edition check this.",
+    "manufacturer":             "Reported via DevInfo/Man. Some compliance or enrollment restriction policies allowlist specific manufacturers (Dell, HP, Lenovo, Microsoft Surface). Visible in Intune portal.",
+    "model":                    "Reported via DevInfo/Mod. Visible in Intune portal. No standard compliance check but used in filters and targeting.",
+    "firmware_ver":             "Reported via DevDetail/FwV. Visible in Intune portal. No standard compliance check.",
+    "hw_version":               "Reported via Device/DevDetail/HwV. Visible in Intune portal. No standard compliance check.",
+    "device_type_str":          "Reported via Device/DevDetail/DevTyp. Use 'PC' for standard desktop/laptop.",
+    "oem":                      "Reported via Device/DevDetail/OEM. Should match manufacturer.",
+    "locale":                   "Reported via DevInfo/Lang. Affects locale-based targeting rules. Use en-GB, en-US etc.",
+    "proc_arch":                "Reported via DevDetail/Ext/Microsoft/ProcessorArchitecture. 9 = AMD64 (x64), 5 = ARM, 12 = ARM64.",
+    "cname":                    "Subject CN used in the MDM enrollment CSR. Visible in the MDM certificate. 'ConfigMgrEnroll' mimics a standard corporate enrollment.",
+    
+	"_section_hardware_ids": "--- HARDWARE IDENTIFIERS (sent in SOAP + SyncML) ---",
+    "mac_address":              "Sent in SOAP enrollment AdditionalContext. Visible in Intune portal. All-zeros is an obvious fake -- use a realistic OUI (e.g. Dell: A4-C3-F0-xx-xx-xx).",
+    "hw_dev_id_enroll":         "HWDevID sent in SOAP enrollment. 64 hex chars. All-zeros is an obvious fake. Derive from a real device: SHA256 of TPM EKpub or SMBIOS UUID.",
+    "hw_dev_id_syncml":         "HWDevID reported via DMClient/HWDevID CSP in SyncML. Should match hw_dev_id_enroll for consistency.",
+    
+	"_section_encryption": "--- ENCRYPTION (two separate checks) ---",
+    "bitlocker_status":         "Reported via Device/Vendor/MSFT/BitLocker/Status/DeviceEncryptionStatus. 2 = encrypted. Self-reported, spoofable. NOTE: the HAS-attested 'Require BitLocker' compliance policy uses HealthAttestation CSP and requires a real TPM -- that cannot be spoofed.",
+    "encryption_compliance":    "Reported via DeviceStatus/Compliance/EncryptionCompliance. 1 = compliant. Generic encryption check, self-reported. Simpler than Require BitLocker and fully spoofable.",
+    
+	"_section_security": "--- SECURITY POSTURE (DeviceStatus CSP -- all self-reported, all spoofable) ---",
+    "firewall_status":          "DeviceStatus/Firewall/Status. 0 = on and monitoring (compliant). 1 = off (non-compliant).",
+    "av_status":                "DeviceStatus/Antivirus/Status. 0 = on and monitoring (compliant). 1 = off. 2 = not monitoring.",
+    "av_signature_status":      "DeviceStatus/Antivirus/SignatureStatus. 0 = up to date (compliant). 1 = out of date.",
+    "antispyware_status":       "DeviceStatus/Antispyware/Status. 0 = on and monitoring (compliant). 1 = off.",
+    "antispyware_sig_status":   "DeviceStatus/Antispyware/SignatureStatus. 0 = up to date (compliant). 1 = out of date.",
+    "tpm_version":              "DeviceStatus/TPM/SpecificationVersion. String e.g. '2.0'. Compliance policies requiring TPM check this. Self-reported -- no cryptographic proof of actual TPM presence.",
+    "secure_boot_state":        "DeviceStatus/SecureBootState. 1 = enabled (compliant). Self-reported path only -- NOT the HAS-attested Secure Boot check which requires real TPM PCR values.",
+    
+	"_section_defender": "--- MICROSOFT DEFENDER (Defender CSP -- all self-reported, all spoofable) ---",
+    "defender_enabled":         "Defender/Health/DefenderEnabled. true = Defender running (compliant).",
+    "defender_version":         "Defender/Health/DefenderVersion. Version string e.g. '4.18.24090.11'. Some policies enforce a minimum Defender version.",
+    "defender_sig_out_of_date": "Defender/Health/SignatureOutOfDate. false = signatures up to date (compliant). true = out of date.",
+    "defender_rtp_enabled":     "Defender/Health/RtpEnabled. true = real-time protection on (compliant).",
+  },
+
+  "os_version":        "10.0.19045.2006",
+  "os_platform":       "Windows 10 Enterprise",
+  "os_edition_enroll": "72",
+  "os_edition_syncml": "4",
+
+  "manufacturer":      "Microsoft Corporation",
+  "model":             "VMware7.1",
+  "firmware_ver":      "VMW71.00V.00000000.000.0000000000",
+  "hw_version":        "Hyper-V UEFI Release v4.0",
+  "device_type_str":   "VMware 7.1",
+  "oem":               "Microsoft Corporation",
+
+  "locale":            "en-US",
+  "proc_arch":         "9",
+
+  "mac_address":       "00-00-00-00-00-00",
+  "hw_dev_id_enroll":  "0000000000000000000000000000000000000000000000000000000000000000",
+  "hw_dev_id_syncml":  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+
+  "bitlocker_status":         2,
+  "cname":                    "ConfigMgrEnroll",
+
+  "encryption_compliance":    "1",
+  "firewall_status":          "0",
+  "av_status":                "0",
+  "av_signature_status":      "0",
+  "antispyware_status":       "0",
+  "antispyware_sig_status":   "0",
+  "tpm_version":              "2.0",
+  "secure_boot_state":        "1",
+  "defender_enabled":         "true",
+  "defender_version":         "4.18.24090.11",
+  "defender_sig_out_of_date": "false",
+  "defender_rtp_enabled":     "true"
+}
