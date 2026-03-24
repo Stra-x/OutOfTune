@@ -95,6 +95,8 @@ If `-r` is supplied, the refresh token is exchanged for a `manage.microsoft.com`
 
 Without `-r` the device will have no primary user.
 
+After this inital checkin, if you do not check in again for an extended period of time (usually days something like 5-7) the device might fall out of compliancy due to the default policy for "Is Active". Depending on the configuration of Intune the device may enter a grace period before being marked as non-complaint, this is a minimum of 1 day but could be longer depending on the target Intune instance. If this happens re-run the `mdm-checkin` command. If you have previously used a refresh token to assign a primary user, this does not have to be submitted again as the primary user is now stored within the Intune backend, just run the `mdm-checkin` command and specify the devices MDM certificate if its not stored in the state file.
+
 ---
 
 ### Check compliance state
