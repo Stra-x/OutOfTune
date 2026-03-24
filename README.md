@@ -201,4 +201,4 @@ python OutOfTune.py check         --cert path/to/device.pfx
 
 ## State file
 
-All phase outputs are saved to `chain_state.json` in the working directory. Delete it to start fresh. Use `status` to inspect current state without running anything. If you are dealing with multiple devices make sure they each have their own state file. The default state file can be changed at the start of the script to which ever device you are messing with.
+All phase outputs are saved to `chain_state.json` in the working directory. Delete it to start fresh. Use `status` to inspect current state without running anything. If you are dealing with multiple devices make sure they each have their own state file. The default state file can be changed at the start of the script to which ever device you are messing with. Be careful with the certificate overide options, they are mainly for debugging purpose.
