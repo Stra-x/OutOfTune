@@ -91,7 +91,7 @@ python OutOfTune.py mdm-checkin -r <refresh_token> -o checkin_output.txt
 
 Runs the OMA-DM SyncML loop against `r.manage.microsoft.com`. Intune will push configuration profiles, app assignments, and any other policies targeting the device.
 
-If `-r` is supplied, the refresh token is exchanged for a `manage.microsoft.com` access token and sent as `Authorization: Bearer` in each SyncML request. Intune reads the UPN from this token and sets it as the device's primary user, causing user-scoped compliance policies to bind.
+If `-r` is supplied, the refresh token is exchanged for a `manage.microsoft.com` access token and sent as `Authorization: Bearer` in each SyncML request. Intune reads the UPN from this token and sets it as the device's primary user, causing user-scoped compliance policies to bind. You only need to run once with `-r` for a user to be assigned, all subsequent checkins can be ran without a refresh token.
 
 Without `-r` the device will have no primary user.
 
