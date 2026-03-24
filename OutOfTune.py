@@ -673,19 +673,32 @@ def cmd_phase4(args):
 # MDM checkin 
 # ----------------------
 
+def _device_name_from_cert_path(cert_path):
+    """Derive device name from MDM cert filename.
+    """
+    import re
+    base = os.path.splitext(os.path.basename(cert_path))[0]
+    return re.sub(r'_mdm$', '', base, flags=re.IGNORECASE)
+
+
 def cmd_phase5(args):
-    log.section("PHASE 5 — MDM checkin (OMA-DM SyncML)")
+    log.section("MDM checkin")
 
     cert_override = getattr(args, 'cert', None)
-    p5_required  = ['device_name', 'tenant', 'uid']
+    p5_required  = ['tenant', 'uid']
     if not cert_override:
-        p5_required.append('mdm_pfx_path')
+        p5_required += ['mdm_pfx_path', 'device_name']
     state = require_state(*p5_required)
 
     mdm_pfx_path = cert_override or state['mdm_pfx_path']
-    device_name  = state['device_name']
     tenant       = state['tenant']
     uid          = state['uid']
+
+    if cert_override:
+        device_name = _device_name_from_cert_path(cert_override)
+        log.info(f"Device name derived from cert filename: {device_name}")
+    else:
+        device_name = state['device_name']
 
     if not os.path.exists(mdm_pfx_path):
         log.error(f"MDM PFX not found: {mdm_pfx_path}")
@@ -711,7 +724,7 @@ def cmd_phase5(args):
     profile = load_profile(profile_path)
 
     # --- exchange RT -> manage.microsoft.com AT ---
-    user_rt   = getattr(args, 'user_refresh_token', None) or state.get('user_rt') or None
+    user_rt   = getattr(args, 'user_refresh_token', None)
     rt_client = getattr(args, 'rt_client_id', None) or state.get('rt_client_id') or DRS_CLIENT_ID
     user_at = None
     if user_rt:
