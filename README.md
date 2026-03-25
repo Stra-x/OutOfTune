@@ -273,3 +273,11 @@ python OutOfTune.py get-remediations  --cert path/to/mdm.pfx
 ## State file
 
 All phase outputs are saved to `chain_state.json` in the working directory. Delete it to start fresh. Use `status` to inspect current state without running anything. If you are dealing with multiple devices make sure they each have their own state file. The default state file can be changed at the start of the script to which ever device you are messing with. Be careful with the certificate overide options, they are mainly for debugging purpose.
+
+# Credits
+
+Huge amount of credit goes to @temp43487580 who created the original Pytune and whose original research made this possible
+  - https://i.blackhat.com/EU-24/Presentations/EU-24-Chudo-Unveiling-the-Power-of-Intune-Leveraging-Intune-for-Breaking-Into-Your-Cloud-and-On-Premise.pdf
+  - https://temp43487580.github.io/intune/bypass-enrollment-restictions-to-break-byod-barriers-in-intune/
+  - https://github.com/secureworks/pytune
+ 
