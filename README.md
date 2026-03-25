@@ -4,6 +4,10 @@ Inspired by the original Pytune, OutOfTune registers a rogue device in Entra ID,
 
 Only supports Windows devices as this was my main goal, might add additional ones in the future.
 
+Accompanying blog:
+- https://stra-x.github.io/Re-Engineering-Pytune-Rogue-devices-in-the-age-of-conditional-access/
+- https://stra-x.github.io/Re-Engineering-Pytune-Rogue-devices-in-the-age-of-conditional-access-pt-2/
+
 ---
 
 ## Requirements
