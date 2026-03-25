@@ -181,6 +181,8 @@ Each policy is saved to `remediations/<PolicyId>/` containing:
 
 ### Cleanup
 
+If removing the device from Intune fails, delete it from Entra. It will then fall into a grace period within Intune and automatically be remained at a later date.
+
 Remove the device from Intune:
 ```
 python OutOfTune.py retire-intune -u user@domain.com -r <refresh_token>
