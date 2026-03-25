@@ -39,7 +39,7 @@ ROPC (credentials known):
 python OutOfTune.py drs-token -u user@domain.com -p Password1!
 ```
 
-Pre-obtained token (phished session via cookie_inject.py):
+Pre-obtained token:
 ```
 python OutOfTune.py drs-token -u user@domain.com -t <drs_access_token>
 ```
@@ -109,7 +109,7 @@ After this initial checkin, if you do not check in again for an extended period 
 | `--save-syncml DIR` | Save raw SyncML XML per round to DIR for offline re-parsing |
 | `-o FILE` | Write full console output to FILE |
 
-#### Extracted intelligence
+#### Extracted useful info
 
 | Category | Saved to | Notes |
 |---|---|---|
