@@ -12,8 +12,6 @@ Only supports Windows devices as this was my main goal, might add additional one
 pip install -r requirements.txt
 ```
 
-Dependencies: `requests`, `pyjwt`, `cryptography`, `roadlib`, `xmltodict`, `asn1crypto`
-
 ---
 
 ## How it works
