@@ -1659,8 +1659,16 @@ def cmd_download_apps(args):
                 policy_id = s.get('PolicyId', f'script_{i}')
                 fname     = f"{_safe_name(policy_id)}.ps1"
                 out       = os.path.join(scripts_dir, fname)
+                body_raw  = s.get('PolicyBody') or ''
+                try:
+                    body = base64.b64decode(body_raw).decode('utf-8')
+                except Exception:
+                    body = body_raw
+                if not body:
+                    log.warning(f"Script {policy_id}: empty PolicyBody — skipping")
+                    continue
                 with open(out, 'w', encoding='utf-8') as f:
-                    f.write(s.get('PolicyBody', ''))
+                    f.write(body)
                 log.success(f"Saved script: scripts/{fname}  (PolicyId: {policy_id})")
 
         log.info("Fetching assigned Win32 apps (GetSelectedApp)...")
